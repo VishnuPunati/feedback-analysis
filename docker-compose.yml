@@ -1,18 +1,29 @@
+version: "3.8"
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.3
+    container_name: feedback-zookeeper
     ports:
       - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:7.5.3
+    container_name: feedback-kafka
     ports:
       - "9092:9092"
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -20,9 +31,16 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cub kafka-ready -b localhost:9092 1 20"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   mysql:
     image: mysql:8.0
+    container_name: feedback-mysql
     ports:
       - "3307:3306"
     environment:
@@ -30,6 +48,21 @@ services:
       MYSQL_DATABASE: feedback_db
     volumes:
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-uroot",
+          "-proot_password",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   api:
     build: ./api
@@ -38,8 +71,21 @@ services:
       - "5000:5000"
     environment:
       KAFKA_BROKER: kafka:9092
+      MYSQL_HOST: mysql
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root_password
+      MYSQL_DB: feedback_db
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   worker:
     build: ./worker
@@ -51,5 +97,13 @@ services:
       MYSQL_PASSWORD: root_password
       MYSQL_DB: feedback_db
     depends_on:
-      - kafka
-      - mysql
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "ps aux | grep consumer.py | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

@@ -1,32 +1,40 @@
 import json
 import time
 import os
+import logging
 from datetime import datetime
 from kafka import KafkaConsumer
 import mysql.connector
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# ======================
-# Config
-# ======================
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
-TOPIC_NAME = "feedback-events"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root_password")
-MYSQL_DB = os.getenv("MYSQL_DB", "feedback_db")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER")
+TOPIC_NAME = "customer_feedback_events"
 
-POSITIVE_WORDS = ["good", "great", "excellent", "amazing", "awesome", "helpful"]
-NEGATIVE_WORDS = ["bad", "poor", "terrible", "worst", "slow", "hate"]
+MYSQL_HOST = os.getenv("MYSQL_HOST")
+MYSQL_USER = os.getenv("MYSQL_USER")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
+MYSQL_DB = os.getenv("MYSQL_DB")
 
-# ======================
-# Helpers
-# ======================
+try:
+    nltk.data.find("sentiment/vader_lexicon.zip")
+except LookupError:
+    nltk.download("vader_lexicon")
+
+analyzer = SentimentIntensityAnalyzer()
+
+
 def analyze_sentiment(text: str) -> str:
-    text = text.lower()
-    if any(word in text for word in POSITIVE_WORDS):
+    score = analyzer.polarity_scores(text)
+    if score["compound"] >= 0.05:
         return "POSITIVE"
-    if any(word in text for word in NEGATIVE_WORDS):
+    if score["compound"] <= -0.05:
         return "NEGATIVE"
     return "NEUTRAL"
 
@@ -41,10 +49,10 @@ def wait_for_mysql():
                 database=MYSQL_DB,
             )
             conn.close()
-            print("✅ MySQL connected")
+            logger.info("MySQL connected")
             return
         except Exception:
-            print("⏳ Waiting for MySQL...")
+            logger.info("Waiting for MySQL...")
             time.sleep(5)
 
 
@@ -57,9 +65,6 @@ def get_db_connection():
     )
 
 
-# ======================
-# Startup
-# ======================
 wait_for_mysql()
 db = get_db_connection()
 cursor = db.cursor()
@@ -70,27 +75,24 @@ consumer = KafkaConsumer(
     value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     auto_offset_reset="earliest",
     enable_auto_commit=True,
-    group_id="feedback-analysis-group",
+    group_id="sentiment_analyzer_group",
 )
 
-print("🚀 Kafka Worker started...")
+logger.info("Kafka worker started")
 
-# ======================
-# Consume loop
-# ======================
 for message in consumer:
-    event = message.value
-
-    sentiment = analyze_sentiment(event["feedback_text"])
-    analysis_time = datetime.utcnow()
-
-    # ✅ Convert ISO → MySQL-safe DATETIME
-    feedback_time = datetime.strptime(
-        event["feedback_timestamp"],
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-
     try:
+        event = message.value
+
+        sentiment = analyze_sentiment(event["feedback_text"])
+
+        analysis_time = datetime.utcnow()
+
+        feedback_time = datetime.strptime(
+            event["feedback_timestamp"],
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
         cursor.execute(
             """
             INSERT INTO feedback_analysis
@@ -107,13 +109,17 @@ for message in consumer:
                 analysis_time,
             ),
         )
+
         db.commit()
-        print(f"✅ Stored feedback {event['message_id']} [{sentiment}]")
+        logger.info(f"Processed message {event['message_id']} sentiment={sentiment}")
 
     except mysql.connector.errors.IntegrityError:
-        print(f"⚠️ Duplicate skipped: {event['message_id']}")
+        logger.warning("Duplicate message skipped")
 
     except mysql.connector.errors.InterfaceError:
-        print("🔄 MySQL reconnecting...")
+        logger.warning("MySQL connection lost, reconnecting")
         db = get_db_connection()
         cursor = db.cursor()
+
+    except Exception as e:
+        logger.error(f"Processing error: {str(e)}")

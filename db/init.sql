@@ -1,4 +1,5 @@
 CREATE DATABASE IF NOT EXISTS feedback_db;
+
 USE feedback_db;
 
 CREATE TABLE IF NOT EXISTS feedback_analysis (
@@ -7,5 +8,6 @@ CREATE TABLE IF NOT EXISTS feedback_analysis (
     feedback_text TEXT NOT NULL,
     sentiment_score VARCHAR(20) NOT NULL,
     feedback_timestamp DATETIME NOT NULL,
-    analysis_timestamp DATETIME NOT NULL
-);
+    analysis_timestamp DATETIME NOT NULL,
+    INDEX idx_sentiment (sentiment_score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
